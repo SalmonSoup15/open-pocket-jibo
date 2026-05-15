@@ -38,6 +38,14 @@ static uint32_t           gLastStatsMs   = 0;
 static const uint32_t     FLUSH_PERIOD_MS = 80;
 static const uint32_t     STATS_PERIOD_MS = 1000;
 
+// Deferred BLE command.  BLE write callbacks run on the nimble_host
+// task whose stack is too small for serial_handle_command() (some
+// commands do heavy string building / printf chains).  The callback
+// stashes the command here; dev_console_tick() picks it up on the
+// main loop where the stack is deep enough.
+static char               gPendingCmd[128] = {};
+static volatile bool      gHasPendingCmd   = false;
+
 // ─── Ring buffer helpers ───────────────────────────────────────────────────
 
 static inline size_t ring_used() {
@@ -133,11 +141,23 @@ void dev_console_println(const char *s) {
 void dev_console_on_ble_cmd(const uint8_t *data, size_t len) {
     if (!g_dev_mode) return;   // reject commands in stock mode
     if (!data || len == 0) return;
-    String cmd((const char *)data, len);
-    cmd.trim();
-    Serial.printf("[devcon] CMD: %s\n", cmd.c_str());
-    if (cmd.length() == 0) return;
-    serial_handle_command(cmd);
+
+    // Stash for deferred execution on the main loop — the nimble_host
+    // stack is too small to run serial_handle_command() inline.
+    size_t copyLen = (len < sizeof(gPendingCmd) - 1) ? len : sizeof(gPendingCmd) - 1;
+    memcpy(gPendingCmd, data, copyLen);
+    gPendingCmd[copyLen] = '\0';
+
+    // Trim trailing whitespace in-place
+    while (copyLen > 0 && (gPendingCmd[copyLen - 1] == ' ' ||
+           gPendingCmd[copyLen - 1] == '\r' || gPendingCmd[copyLen - 1] == '\n')) {
+        gPendingCmd[--copyLen] = '\0';
+    }
+
+    if (copyLen > 0) {
+        Serial.printf("[devcon] CMD queued: %s\n", gPendingCmd);
+        gHasPendingCmd = true;
+    }
 }
 
 // ─── Stats blob ────────────────────────────────────────────────────────────
@@ -358,6 +378,12 @@ static void publish_stats() {
 // two MTUs) and let multiple ticks drain the rest.
 
 void dev_console_tick() {
+    // Execute deferred BLE command on the main-loop stack (safe).
+    if (gHasPendingCmd) {
+        gHasPendingCmd = false;
+        serial_handle_command(String(gPendingCmd));
+    }
+
     if (!gEnabled || !gRing) return;
     uint32_t now = millis();
 
