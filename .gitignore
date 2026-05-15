@@ -1,0 +1,99 @@
+# =============================================================================
+# Arduino / ESP32 Firmware
+# =============================================================================
+
+# Arduino IDE build cache
+/Jibo-ESP/.cache/
+/Jibo-ESP/build/
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Compiled firmware binaries
+*.elf
+*.bin
+*.hex
+*.map
+
+# Compiler intermediate files
+*.o
+*.d
+*.a
+
+# Arduino IDE workspace settings
+/Jibo-ESP/.arduino15/
+
+# =============================================================================
+# Android App
+# =============================================================================
+
+# Gradle build outputs
+build/
+.gradle/
+
+# Android-specific generated files
+*.apk
+*.aab
+*.aar
+local.properties
+
+# External native build directories
+.externalNativeBuild/
+.cxx/
+
+# Android Studio captures
+captures/
+
+# =============================================================================
+# IDE Files
+# =============================================================================
+
+# IntelliJ IDEA / Android Studio
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+.idea/deploymentTargetSelector.xml
+*.iml
+
+# Visual Studio Code
+.vscode/
+
+# Eclipse
+.project
+.classpath
+.settings/
+
+# =============================================================================
+# Claude Code
+.claude/
+
+# OS Junk
+# =============================================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# =============================================================================
+# Credentials / Secrets
+# =============================================================================
+secrets.h
+credentials.h
+*.key
+*.pem
