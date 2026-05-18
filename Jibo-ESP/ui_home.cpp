@@ -13,6 +13,7 @@ extern bool pmu_is_charging();
 // ─── Icon image declarations ──────────────────────────────────────────────
 LV_IMG_DECLARE(icon_settings);
 LV_IMG_DECLARE(icon_phone);
+LV_IMG_DECLARE(icon_messages);
 
 // ─── File-scoped statics ──────────────────────────────────────────────────
 static lv_obj_t  *uiHomeContainer = NULL;
@@ -121,6 +122,24 @@ static void draw_phone_icon(lv_obj_t *parent) {
     lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
 }
 
+static void messages_icon_cb(lv_event_t *e) {
+    if (!is_valid_tap()) return;
+    block_touch_until_release();
+    if (uiHomeContainer) fade_out_children(uiHomeContainer, 150);
+    fade_out_battery_ring(150);
+    states_set_enter_ms(millis());
+    states_set_sub_step(204);
+}
+
+static void draw_messages_icon(lv_obj_t *parent) {
+    lv_obj_t *img = lv_img_create(parent);
+    lv_img_set_src(img, &icon_messages);
+    lv_obj_set_style_img_recolor(img, lv_color_white(), 0);
+    lv_obj_set_style_img_recolor_opa(img, LV_OPA_COVER, 0);
+    lv_obj_center(img);
+    lv_obj_clear_flag(img, LV_OBJ_FLAG_CLICKABLE);
+}
+
 // ─── App button / label builders ──────────────────────────────────────────
 
 static lv_obj_t *make_app_btn(lv_obj_t *parent, lv_coord_t xOff, lv_coord_t yOff,
@@ -167,13 +186,17 @@ void ui_home_init() {
 
     // Center Settings if phone isn't paired, otherwise show both side by side
     if (ble_is_paired()) {
-        lv_obj_t *settBtn = make_app_btn(uiHomeContainer, -85, -20, settings_icon_cb);
-        draw_settings_icon(settBtn);
-        make_app_label(uiHomeContainer, "Settings", -85, 55);
+        lv_obj_t *msgBtn = make_app_btn(uiHomeContainer, 0, -80, messages_icon_cb);
+        draw_messages_icon(msgBtn);
+        make_app_label(uiHomeContainer, "Messages", 0, -15);
 
-        lv_obj_t *findBtn = make_app_btn(uiHomeContainer, 85, -20, phone_finder_icon_cb);
+        lv_obj_t *settBtn = make_app_btn(uiHomeContainer, -100, 20, settings_icon_cb);
+        draw_settings_icon(settBtn);
+        make_app_label(uiHomeContainer, "Settings", -100, 95);
+
+        lv_obj_t *findBtn = make_app_btn(uiHomeContainer, 100, 20, phone_finder_icon_cb);
         draw_phone_icon(findBtn);
-        make_app_label(uiHomeContainer, "Find Phone", 85, 55);
+        make_app_label(uiHomeContainer, "Find Phone", 100, 95);
     } else {
         lv_obj_t *settBtn = make_app_btn(uiHomeContainer, 0, -20, settings_icon_cb);
         draw_settings_icon(settBtn);
@@ -203,6 +226,11 @@ void ui_home_tick() {
     if (sub == 203 && millis() - enterMs >= 200) {
         states_set_sub_step(0);
         enter_state(STATE_PHONE_FINDER);
+        return;
+    }
+    if (sub == 204 && millis() - enterMs >= 200) {
+        states_set_sub_step(0);
+        enter_state(STATE_MESSAGES);
         return;
     }
     if (millis() - lastBattUpdateMs >= 5000) {

@@ -20,6 +20,8 @@
 #include "ui_helpers.h"
 #include "ui_home.h"
 #include "settings_ui.h"
+#include "messages_ui.h"
+#include "messages.h"
 #include "log.h"
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -103,6 +105,12 @@ extern bool pmu_is_charging();
 // notification pills.  Polled by states_tick() and reset to 0 once
 // fired so the resume happens exactly once per wake cycle.
 static uint32_t gPostWakeNotifResumeMs = 0;
+
+// ─── Pending message compose (queued by Gemini tool, fires after speaking) ──
+static bool   gPendingMsgCompose = false;
+static String gPendingMsgContact;
+static String gPendingMsgText;
+
 extern void pmu_shutdown();
 extern void display_off();
 extern void display_on();
@@ -505,6 +513,8 @@ static const char *state_name(JiboState s) {
         case STATE_PHONE_FINDER:     return "PHONE_FINDER";
         case STATE_IMU_DEBUG:        return "IMU_DEBUG";
         case STATE_DEV_TRANSITION:   return "DEV_TRANSITION";
+        case STATE_MESSAGES:         return "MESSAGES";
+        case STATE_MSG_COMPOSE:      return "MSG_COMPOSE";
         default:                     return "???";
     }
 }
@@ -554,6 +564,14 @@ void enter_state(JiboState s) {
         case STATE_PHONE_FINDER:     enter_phone_finder();     break;
         case STATE_IMU_DEBUG:        enter_imu_debug();        break;
         case STATE_DEV_TRANSITION:   enter_dev_transition();   break;
+        case STATE_MESSAGES:
+            ui_home_destroy();
+            msg_ui_init();
+            break;
+        case STATE_MSG_COMPOSE:
+            msg_ui_init_compose(msg_compose().contact_name.c_str(),
+                                msg_compose().text.c_str());
+            break;
     }
 }
 
@@ -1673,6 +1691,16 @@ static void tick_speaking() {
     if (!audio_is_playing() && gemini_is_done()) {
         eye_set_zoom(ZOOM_FULL);
         gemini_clear();
+        if (gPendingMsgCompose) {
+            gPendingMsgCompose = false;
+            msg_compose().contact_name = gPendingMsgContact;
+            msg_compose().text = gPendingMsgText;
+            msg_compose().state = COMPOSE_IDLE;
+            gPendingMsgContact = "";
+            gPendingMsgText = "";
+            enter_state(STATE_MSG_COMPOSE);
+            return;
+        }
         enter_state(STATE_IDLE);
     }
 }
@@ -2864,6 +2892,14 @@ void states_tick() {
         enter_state(STATE_UI_HOME);
         return;
     }
+    if ((state == STATE_MESSAGES || state == STATE_MSG_COMPOSE) && btnPressed) {
+        msg_ui_btn_press();
+        return;
+    }
+    if ((state == STATE_MESSAGES || state == STATE_MSG_COMPOSE) && btnReleased) {
+        msg_ui_btn_release();
+        return;
+    }
     if (state == STATE_UI_HOME && btnPressed) {
         ui_home_btn_press();
         return;
@@ -2931,6 +2967,8 @@ void states_tick() {
         case STATE_PHONE_FINDER:     tick_phone_finder();      break;
         case STATE_IMU_DEBUG:        tick_imu_debug();         break;
         case STATE_DEV_TRANSITION:   tick_dev_transition();    break;
+        case STATE_MESSAGES:         msg_ui_tick();            break;
+        case STATE_MSG_COMPOSE:      msg_ui_tick();            break;
     }
 }
 
@@ -3219,4 +3257,10 @@ void states_pwr_long() {
         return;
     }
     enter_state(STATE_POWER_OFF_SLIDE);
+}
+
+void states_queue_msg_compose(const String &contact, const String &text) {
+    gPendingMsgCompose = true;
+    gPendingMsgContact = contact;
+    gPendingMsgText = text;
 }

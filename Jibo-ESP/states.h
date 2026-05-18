@@ -23,7 +23,9 @@ enum JiboState {
     STATE_POWER_OFF_SLIDE,
     STATE_PHONE_FINDER,
     STATE_IMU_DEBUG,
-    STATE_DEV_TRANSITION     // slide-to-toggle developer mode
+    STATE_DEV_TRANSITION,    // slide-to-toggle developer mode
+    STATE_MESSAGES,          // Messages applet
+    STATE_MSG_COMPOSE        // Gemini-tool-initiated message compose
 };
 
 void states_init();
@@ -47,3 +49,5 @@ void states_exit_imu_debug();
 
 void states_pwr_short();
 void states_pwr_long();
+
+void states_queue_msg_compose(const String &contact, const String &text);

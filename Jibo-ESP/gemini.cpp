@@ -279,6 +279,19 @@ static void gemini_dispatch_side_effects(const String &sideEffects) {
         String args = (colon > 0) ? entry.substring(colon + 1) : String();
         if (name == "store.memory") {
             apply_store_memory(args);
+        } else if (name == "send.message") {
+            int pipe = args.indexOf('|');
+            if (pipe > 0) {
+                String contact = args.substring(0, pipe);
+                String text = args.substring(pipe + 1);
+                contact.trim();
+                text.trim();
+                if (contact.length() > 0 && text.length() > 0) {
+                    extern void states_queue_msg_compose(const String &, const String &);
+                    states_queue_msg_compose(contact, text);
+                    LOG1("[tool] send.message: to=%s text=%.60s\n", contact.c_str(), text.c_str());
+                }
+            }
         } else {
             LOG1("[tool] unknown side-effect tool: %s\n", name.c_str());
         }
@@ -1729,6 +1742,7 @@ static char *build_system_prompt_psram(size_t *outLen) {
         "    [show.text]{ ...LaTeX... }     -- on-screen math / equations\n"
         "    [show.stock]{ TICKER | RANGE } -- on-screen live stock card (RANGE: 1d,1w,1m,6m,ytd,1y)\n"
         "    [store.memory]{ short fact }   -- save a durable fact about the user\n"
+        "    [send.message]{ name | message } -- send a text message to a contact\n"
         "- Place tool calls at the VERY START of your response, before "
         "any spoken text. They are not heard by the user.\n"
         "- Multiple tools may be chained: e.g. "
@@ -1773,6 +1787,11 @@ static char *build_system_prompt_psram(size_t *outLen) {
         "stored fact short, declarative, third-person about the user "
         "(\"User lives in Windsor, California\"). After storing, briefly "
         "confirm in the spoken response (\"Got it, I'll remember that\").\n"
+        "- send.message: name is the contact's display name. message is the text "
+        "to send. The pipe | separates name from message. The device shows the "
+        "message for user confirmation before sending. Example:\n"
+        "    user: \"text John that I'm running late\" -> "
+        "[send.message]{John|I'm running late!} Sure, I'll send that message.\n"
         "- After any tool call, still speak a short natural sentence so "
         "the response isn't silent.\n"
         "- Examples:\n"
@@ -1785,7 +1804,9 @@ static char *build_system_prompt_psram(size_t *outLen) {
         "[show.stock]{AAPL|ytd} Here's Apple's performance so far this year.\n"
         "    user: \"remember that I live in Windsor, California\" -> "
         "[store.memory]{User lives in Windsor, California} "
-        "Got it, I'll remember that.\n\n")) {
+        "Got it, I'll remember that.\n"
+        "    user: \"text John that I'm running late\" -> "
+        "[send.message]{John|I'm running late!} Sure, I'll send that message.\n\n")) {
         free(buf);
         return NULL;
     }
