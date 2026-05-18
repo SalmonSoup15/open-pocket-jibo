@@ -138,6 +138,7 @@ object GeminiClient {
         append("    [show.text]{ ...LaTeX... }     -- on-screen math / equations\n")
         append("    [show.stock]{ TICKER | RANGE } -- on-screen live stock card (RANGE: 1d,1w,1m,6m,ytd,1y)\n")
         append("    [store.memory]{ short fact }   -- save a durable fact about the user\n")
+        append("    [send.message]{ name | message } -- send a text message to a contact\n")
         append("- Place tool calls at the VERY START of your response, before any spoken text. They are not heard by the user.\n")
         append("- Multiple tools may be chained: e.g. [store.memory]{user's dog is named Rex} [show.text]{...} ...\n")
         append("- Use a display tool (show.*) ONLY when the answer is best shown rather than spoken. Don't use one for plain prose.\n")
@@ -149,7 +150,11 @@ object GeminiClient {
         append("    user: \"what's the quadratic formula?\" -> [show.text]{x = \\frac{-b \\pm \\sqrt{b^{2} - 4ac}}{2a}} Here's the quadratic formula.\n")
         append("    user: \"how's nvidia doing today?\" -> [show.stock]{NVDA} Here's the latest on NVIDIA.\n")
         append("    user: \"show me apple stock this year\" -> [show.stock]{AAPL|ytd} Here's Apple's performance so far this year.\n")
-        append("    user: \"remember that I live in Windsor, California\" -> [store.memory]{User lives in Windsor, California} Got it, I'll remember that.\n\n")
+        append("    user: \"remember that I live in Windsor, California\" -> [store.memory]{User lives in Windsor, California} Got it, I'll remember that.\n")
+        append("- send.message: name is the contact's name, message is the text to send. ")
+        append("Pipe | separates them. The device confirms before sending. Example:\n")
+        append("    user: \"text John that I'm running late\" -> ")
+        append("[send.message]{John|I'm running late!} Sure, I'll send that to John.\n\n")
 
         if (phoneLinked) {
             append("PHONE LINK: Phone is connected, notifications are live.\n\n")

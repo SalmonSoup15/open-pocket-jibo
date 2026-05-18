@@ -33,6 +33,10 @@ void eye_stop_idle();
 
 void eye_open_anim(void (*on_done)(void));
 
+void eye_loading_start();
+void eye_loading_stop(void (*on_done)(void) = nullptr);
+bool eye_is_loading();
+
 bool eye_is_blinking();
 
 // True when the eye's lerped position has settled within `threshold`

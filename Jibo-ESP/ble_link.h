@@ -71,6 +71,50 @@
 #define BLE_OP_SETTINGS_DATA   0x61  // J->P: UTF-8 key=value\n blob
 #define BLE_OP_SETTINGS_WRITE  0x62  // P->J: UTF-8 key=value\n (one or more)
 
+// ─── Messaging (phone-proxied SMS / chat) ──────────────────────────────────
+//
+// Conversation list:
+//   J->P  MSG_CONVO_REQ      0x70  empty — request conversation summaries
+//   P->J  MSG_CONVO_DATA     0x71  UTF-8 chunk of conversations JSON
+//   P->J  MSG_CONVO_DONE     0x72  1B status (0=ok, 1=error)
+//
+// Thread messages:
+//   J->P  MSG_THREAD_REQ     0x73  UTF-8 thread_id
+//   P->J  MSG_THREAD_DATA    0x74  UTF-8 chunk of messages JSON
+//   P->J  MSG_THREAD_DONE    0x75  1B status (0=ok, 1=error)
+//
+// Send a message:
+//   J->P  MSG_SEND           0x76  UTF-8 JSON {contact_id, text, ...}
+//   P->J  MSG_SEND_RESULT    0x77  1B status (0=ok, 1=error)
+//
+// Real-time push:
+//   P->J  MSG_NEW_PUSH       0x78  UTF-8 JSON (single new message)
+//
+// Speech-to-text for compose:
+//   J->P  MSG_STT_START      0x79  empty — begin STT capture on phone
+//   J->P  MSG_STT_STOP       0x7A  empty — stop capture, finalize
+//   P->J  MSG_STT_RESULT     0x7B  UTF-8 transcribed text
+//   P->J  MSG_STT_ERROR      0x7C  1B error code
+//
+// Contact search (disambiguation):
+//   J->P  MSG_CONTACT_SEARCH 0x7D  UTF-8 name query
+//   P->J  MSG_CONTACT_RESULT 0x7E  UTF-8 JSON array of matches
+#define BLE_OP_MSG_CONVO_REQ      0x70
+#define BLE_OP_MSG_CONVO_DATA     0x71
+#define BLE_OP_MSG_CONVO_DONE     0x72
+#define BLE_OP_MSG_THREAD_REQ     0x73
+#define BLE_OP_MSG_THREAD_DATA    0x74
+#define BLE_OP_MSG_THREAD_DONE    0x75
+#define BLE_OP_MSG_SEND           0x76
+#define BLE_OP_MSG_SEND_RESULT    0x77
+#define BLE_OP_MSG_NEW_PUSH       0x78
+#define BLE_OP_MSG_STT_START      0x79
+#define BLE_OP_MSG_STT_STOP       0x7A
+#define BLE_OP_MSG_STT_RESULT     0x7B
+#define BLE_OP_MSG_STT_ERROR      0x7C
+#define BLE_OP_MSG_CONTACT_SEARCH 0x7D
+#define BLE_OP_MSG_CONTACT_RESULT 0x7E
+
 // ─── Phone-assisted setup protocol ─────────────────────────────────────────
 #define BLE_OP_SETUP_MODE      0x50  // J->P: 1B (1=in_setup, 0=normal)
 #define BLE_OP_SETUP_WIFI      0x51  // P->J: [op][1B enterprise][ssid\0][pass\0][username\0 if enterprise]
@@ -160,3 +204,11 @@ void     ble_send_all_settings();           // send full settings blob to phone
 bool     ble_settings_write_received();     // true if a SETTINGS_WRITE arrived
 String   ble_get_settings_write_payload();  // consume the payload
 void     ble_clear_settings_write();
+
+// ─── Messaging ────────────────────────────────────────────────────────────
+void     ble_msg_request_conversations();
+void     ble_msg_request_thread(const String &thread_id);
+void     ble_msg_send(const String &json);
+void     ble_msg_stt_start();
+void     ble_msg_stt_stop();
+void     ble_msg_contact_search(const String &name);

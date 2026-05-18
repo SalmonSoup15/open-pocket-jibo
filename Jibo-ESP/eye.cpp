@@ -50,6 +50,30 @@ static float       lookRadius     = 60.0f;
 static bool  openAnimActive = false;
 static void (*openAnimCb)(void) = NULL;
 
+// ─── Loading animation ─────────────────────────────────────────────────────
+static bool     loadActive     = false;
+static int      loadPhase      = 0;      // 0=enter, 1=spin, 2=exit
+static float    loadProgress   = 0.0f;   // transition 0-1
+static float    loadFlatness   = 0.0f;   // palette flatten: 0=normal, 1=white
+static float    loadHeadAngle  = 0.0f;   // leading edge, monotonically increasing
+static float    loadTailAngle  = 0.0f;   // trailing edge, monotonically increasing
+static uint32_t loadTransMs    = 0;
+static void   (*loadDoneCb)(void) = nullptr;
+
+static const uint32_t LOAD_TRANS_MS   = 350;
+static const float    LOAD_RING_PX    = 4.0f;
+static const float    LOAD_MIN_SWEEP  = 18.0f;
+static const float    LOAD_MAX_SWEEP  = 270.0f;
+static const float    LOAD_BASE_DPS   = 300.0f;
+static const float    LOAD_CYCLE_MS   = 1000.0f;
+
+static float    loadSweep      = 18.0f;
+static float    loadCycleTime  = 0.0f;
+static float    loadGapBlend   = 0.0f;
+static bool     loadGapClosing = false;
+static float    loadExitFrom   = 1.0f;
+static const float LOAD_GAP_RAMP_S = 0.3f;
+
 // ─── LVGL objects ───────────────────────────────────────────────────────────
 static lv_obj_t   *canvas    = NULL;
 static lv_color_t *cbuf      = NULL;
@@ -76,10 +100,12 @@ static uint16_t activePalette[256];
 
 static void rebuild_palette() {
     float bright = 1.0f - curDim;
+    float tintAmt = curTint * (1.0f - loadFlatness);
     for (int i = 0; i < 256; i++) {
-        float v = i * bright;
-        uint8_t r = (uint8_t)(v * (1.0f - curTint * 0.55f));
-        uint8_t g = (uint8_t)(v * (1.0f - curTint * 0.08f));
+        float base = i + (255.0f - i) * loadFlatness;
+        float v = base * bright;
+        uint8_t r = (uint8_t)(v * (1.0f - tintAmt * 0.55f));
+        uint8_t g = (uint8_t)(v * (1.0f - tintAmt * 0.08f));
         uint8_t b = (uint8_t)(v);
         activePalette[i] = lv_color_make(r, g, b).full;
     }
@@ -261,6 +287,163 @@ static void look_cb(lv_timer_t *tmr) {
     lv_timer_set_period(tmr, next);
 }
 
+// ─── Loading animation helpers ──────────────────────────────────────────────
+
+static float ease_out_cubic(float t) {
+    float f = t - 1.0f;
+    return f * f * f + 1.0f;
+}
+
+static void spinner_advance_state() {
+    float baseDelta = LOAD_BASE_DPS * 0.016f;
+    loadHeadAngle += baseDelta;
+    loadTailAngle += baseDelta;
+
+    loadCycleTime += 16.0f;
+    float cycleT = fmodf(loadCycleTime / LOAD_CYCLE_MS, 1.0f);
+    float sweepT = 0.5f - 0.5f * cosf(cycleT * 2.0f * 3.14159f);
+    float cycleSweep = LOAD_MIN_SWEEP + (LOAD_MAX_SWEEP - LOAD_MIN_SWEEP) * sweepT;
+
+    float easedBlend;
+    if (loadGapClosing) {
+        easedBlend = ease_out_cubic(loadGapBlend);
+    } else {
+        easedBlend = loadGapBlend * loadGapBlend * loadGapBlend;
+    }
+    float targetSweep = 360.0f + (cycleSweep - 360.0f) * easedBlend;
+
+    float currentSweep = loadHeadAngle - loadTailAngle;
+    if (targetSweep > currentSweep) {
+        loadHeadAngle = loadTailAngle + targetSweep;
+    } else if (targetSweep < currentSweep) {
+        loadTailAngle = loadHeadAngle - targetSweep;
+    }
+    loadSweep = loadHeadAngle - loadTailAngle;
+    if (loadSweep > 360.0f) loadSweep = 360.0f;
+}
+
+static void loading_tick() {
+    if (!loadActive) return;
+    uint32_t now = millis();
+    float elapsed = (float)(now - loadTransMs);
+
+    if (loadPhase == 0) {
+        float rawT = elapsed / (float)LOAD_TRANS_MS;
+        if (rawT >= 1.0f) rawT = 1.0f;
+        float t = ease_out_cubic(rawT);
+        loadProgress = t;
+        loadFlatness = t;
+        if (rawT >= 1.0f) {
+            loadPhase = 1;
+            loadTransMs = now;
+        }
+    } else if (loadPhase == 1) {
+        if (loadGapClosing) {
+            loadGapBlend -= 0.016f / LOAD_GAP_RAMP_S;
+            if (loadGapBlend <= 0.0f) {
+                loadGapBlend = 0.0f;
+                loadGapClosing = false;
+                loadExitFrom = loadProgress;
+                loadPhase = 2;
+                loadTransMs = now;
+                return;
+            }
+        } else if (loadGapBlend < 1.0f) {
+            loadGapBlend += 0.016f / LOAD_GAP_RAMP_S;
+            if (loadGapBlend > 1.0f) loadGapBlend = 1.0f;
+        }
+
+        spinner_advance_state();
+    } else if (loadPhase == 2) {
+        float rawT = elapsed / (float)LOAD_TRANS_MS;
+        if (rawT >= 1.0f) rawT = 1.0f;
+        float t = ease_out_cubic(rawT);
+        loadProgress = loadExitFrom * (1.0f - t);
+        loadFlatness = loadProgress;
+        if (rawT >= 1.0f) {
+            loadActive = false;
+            loadProgress = 0.0f;
+            loadFlatness = 0.0f;
+            rebuild_palette();
+            prevLX = 99.0f;
+            if (loadDoneCb) { loadDoneCb(); loadDoneCb = nullptr; }
+        }
+    }
+}
+
+static void apply_loading_hole(float holeR) {
+    if (holeR <= 0.0f) return;
+    int cx = SPHERE_R;
+    int cy = SPHERE_R;
+    int iR = (int)(holeR + 0.5f);
+    int top = cy - iR;
+    int bot = cy + iR;
+    if (top < 0) top = 0;
+    if (bot >= SPHERE_DIAM) bot = SPHERE_DIAM - 1;
+
+    for (int py = top; py <= bot; py++) {
+        float dy = (float)(py - cy);
+        float dx2 = holeR * holeR - dy * dy;
+        if (dx2 <= 0.0f) continue;
+        float dx = sqrtf(dx2);
+        int x0 = cx - (int)(dx);
+        int x1 = cx + (int)(dx);
+        if (x0 < 0) x0 = 0;
+        if (x1 >= SPHERE_DIAM) x1 = SPHERE_DIAM - 1;
+        int count = x1 - x0 + 1;
+        if (count > 0)
+            memset(&cbuf[py * SPHERE_DIAM + x0], 0, count * sizeof(lv_color_t));
+    }
+}
+
+static void render_spinner(float startAngle, float sweep) {
+    memset(cbuf, 0, SPHERE_DIAM * SPHERE_DIAM * sizeof(lv_color_t));
+
+    float innerR = (float)SPHERE_R - LOAD_RING_PX;
+    float outerR = (float)SPHERE_R;
+    float cx = (float)SPHERE_R;
+    float cy = (float)SPHERE_R;
+
+    float arcEnd = startAngle + sweep;
+    if (arcEnd >= 360.0f) arcEnd -= 360.0f;
+
+    int iTop = (int)(cy - outerR);
+    int iBot = (int)(cy + outerR + 1.0f);
+    if (iTop < 0) iTop = 0;
+    if (iBot >= SPHERE_DIAM) iBot = SPHERE_DIAM - 1;
+
+    for (int py = iTop; py <= iBot; py++) {
+        float dy = (float)py - cy + 0.5f;
+        float dy2 = dy * dy;
+        if (dy2 > outerR * outerR) continue;
+
+        float oxSpan = sqrtf(outerR * outerR - dy2);
+        int x0 = (int)(cx - oxSpan);
+        int x1 = (int)(cx + oxSpan);
+        if (x0 < 0) x0 = 0;
+        if (x1 >= SPHERE_DIAM) x1 = SPHERE_DIAM - 1;
+
+        for (int px = x0; px <= x1; px++) {
+            float dx = (float)px - cx + 0.5f;
+            float dist2 = dx * dx + dy2;
+            if (dist2 < innerR * innerR || dist2 > outerR * outerR) continue;
+
+            float ang = atan2f(-dy, dx) * (180.0f / 3.14159f);
+            if (ang < 0.0f) ang += 360.0f;
+
+            bool inArc;
+            if (startAngle < arcEnd) {
+                inArc = (ang >= startAngle && ang < arcEnd);
+            } else {
+                inArc = (ang >= startAngle || ang < arcEnd);
+            }
+            if (!inArc) continue;
+
+            cbuf[py * SPHERE_DIAM + px].full = activePalette[255];
+        }
+    }
+}
+
 // ─── Periodic render ────────────────────────────────────────────────────────
 static void render_tick(lv_timer_t *) {
     curX += (tgtX - curX) * LERP_POS;
@@ -275,11 +458,16 @@ static void render_tick(lv_timer_t *) {
         curZoomF += zd * lerpZoom;
     }
 
+    // ── Loading animation tick ──────────────────────────────────────────
+    float prevLoadFlatness = loadFlatness;
+    loading_tick();
+    bool loadFlatnessChanged = (loadFlatness != prevLoadFlatness);
+
     // ── Tint & dim animation ─────────────────────────────────────────────
     float tintDelta = tgtTint - curTint;
     float dimDelta  = tgtDim  - curDim;
     bool  paletteChanged = false;
-    if (fabsf(tintDelta) > 0.005f || fabsf(dimDelta) > 0.005f) {
+    if (fabsf(tintDelta) > 0.005f || fabsf(dimDelta) > 0.005f || loadFlatnessChanged) {
         if (fabsf(tintDelta) > 0.005f) curTint += tintDelta * 0.35f;
         else                            curTint = tgtTint;
         if (fabsf(dimDelta)  > 0.005f) curDim  += dimDelta  * 0.25f;
@@ -294,6 +482,28 @@ static void render_tick(lv_timer_t *) {
     }
     bool tintChanged = paletteChanged;
 
+    // ── Spinner phase: skip sphere rendering entirely ────────────────────
+    if (loadActive && loadPhase == 1) {
+        float renderStart = fmodf(loadTailAngle, 360.0f);
+        if (renderStart < 0.0f) renderStart += 360.0f;
+        render_spinner(renderStart, loadSweep);
+        lv_obj_invalidate(canvas);
+        prevLX = 99.0f;
+
+        lv_coord_t nx = (lv_coord_t)(curX) - SPHERE_R;
+        lv_coord_t ny = (lv_coord_t)(curY) - SPHERE_R;
+        if (nx != lastCanvX || ny != lastCanvY) {
+            lv_obj_set_pos(canvas, nx, ny);
+            lastCanvX = nx; lastCanvY = ny;
+        }
+        uint16_t zoomInt = (uint16_t)(curZoomF + 0.5f);
+        if (zoomInt != lastCanvZoom) {
+            lv_img_set_zoom(canvas, zoomInt);
+            lastCanvZoom = zoomInt;
+        }
+        return;
+    }
+
     float lx = lightX, ly = lightY;
     if (lightFollows) {
         float halfW = (float)(SCR_W / 2);
@@ -306,11 +516,15 @@ static void render_tick(lv_timer_t *) {
     bool  needRedraw = delta > 0.003f || tintChanged;
 
     int prevBR = blinkRow;
-    blink_tick();
+    if (!loadActive) blink_tick();
     bool blinkChanged = (blinkRow != prevBR);
 
     if (needRedraw) {
         render_sphere(lx, ly);
+        if (loadActive && loadProgress > 0.0f) {
+            float holeR = ((float)SPHERE_R - LOAD_RING_PX) * loadProgress;
+            apply_loading_hole(holeR);
+        }
         if (cleanBuf)
             memcpy(cleanBuf, cbuf, SPHERE_DIAM * SPHERE_DIAM * sizeof(lv_color_t));
         if (blinkRow > 0) apply_blink_mask(blinkRow);
@@ -546,4 +760,43 @@ void eye_set_dim(float amount) {
 
 lv_obj_t *eye_get_canvas() {
     return canvas;
+}
+
+void eye_loading_start() {
+    if (loadActive) return;
+    eye_stop_idle();
+    eye_set_pos(SCR_W / 2.0f, SCR_H / 2.0f);
+    loadActive     = true;
+    loadPhase      = 0;
+    loadProgress   = 0.0f;
+    loadFlatness   = 0.0f;
+    loadHeadAngle  = 360.0f;
+    loadTailAngle  = 0.0f;
+    loadSweep      = 360.0f;
+    loadCycleTime  = 0.0f;
+    loadGapBlend   = 0.0f;
+    loadGapClosing = false;
+    loadExitFrom   = 1.0f;
+    loadTransMs    = millis();
+    loadDoneCb     = nullptr;
+}
+
+void eye_loading_stop(void (*on_done)(void)) {
+    if (!loadActive) return;
+    if (loadPhase == 2 || loadGapClosing) {
+        if (on_done) loadDoneCb = on_done;
+        return;
+    }
+    loadDoneCb = on_done;
+    if (loadPhase == 1) {
+        loadGapClosing = true;
+    } else {
+        loadExitFrom = loadProgress;
+        loadPhase = 2;
+        loadTransMs = millis();
+    }
+}
+
+bool eye_is_loading() {
+    return loadActive;
 }

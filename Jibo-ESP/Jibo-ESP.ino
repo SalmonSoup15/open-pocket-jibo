@@ -35,6 +35,7 @@
 #include "gemini.h"
 #include "ble_link.h"
 #include "notifications.h"
+#include "messages.h"
 #include "pill_overlay.h"
 #include "time_sync.h"
 #include "dev_console.h"
@@ -292,6 +293,9 @@ void setup() {
 
     VBOOT_STEP("Notifications init...");
     notifications_init();
+
+    // --- Messages data model ---
+    msg_init();
 
     // --- Gemini API ---
     VBOOT_STEP("Gemini init...");
@@ -627,6 +631,7 @@ void serial_handle_command(const String &cmdIn) {
         dev_console_println("  notifsync             Request fresh notification snapshot from phone");
         dev_console_println("  taskmanager / tasks   Print FreeRTOS task table");
         dev_console_println("  log_level 0..3        Set log verbosity");
+        dev_console_println("  eyeloadtest           Toggle eye loading animation");
         dev_console_println("  testtone              Play 1kHz sine for 2s");
         dev_console_println("  export                Dump all config as a copy-pasteable string");
         dev_console_println("  import <string>       Restore config from an export string");
@@ -1001,6 +1006,17 @@ void serial_handle_command(const String &cmdIn) {
             }
         }
 
+    } else if (cmd == "eyeloadtest") {
+        if (eye_is_loading()) {
+            dev_console_println("[eye] Stopping loading animation...");
+            eye_loading_stop([]() {
+                eye_start_idle();
+                dev_console_println("[eye] Loading animation exited");
+            });
+        } else {
+            dev_console_println("[eye] Starting loading animation...");
+            eye_loading_start();
+        }
     } else if (cmd == "testtone") {
         dev_console_println("[test] Generating 1kHz sine wave (2s)...");
         const int sr = 16000;

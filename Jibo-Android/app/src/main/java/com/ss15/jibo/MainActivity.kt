@@ -89,7 +89,11 @@ class MainActivity : ComponentActivity() {
         val perms = mutableListOf(
             Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.BLUETOOTH_CONNECT,
-            Manifest.permission.ACCESS_FINE_LOCATION
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.READ_SMS,
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.RECORD_AUDIO
         )
         if (Build.VERSION.SDK_INT >= 33) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)

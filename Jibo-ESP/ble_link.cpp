@@ -3,6 +3,7 @@
 #include "audio.h"
 #include "gemini.h"
 #include "notifications.h"
+#include "messages.h"
 #include "dev_console.h"
 #include "event_log.h"
 #include "log.h"
@@ -65,6 +66,10 @@ static String        stockErrMsg;   // populated when phone reports failure
 // ─── Remote settings state ──────────────────────────────────────────────
 static volatile bool settingsWriteReceived = false;
 static String        settingsWritePayload;
+
+// ─── Messaging reassembly buffers ──────────────────────────────────────
+static String sMsgConvoBuffer;
+static String sMsgThreadBuffer;
 
 // ─── Phone-assisted setup state ─────────────────────────────────────────
 static volatile bool setupWifiReceived     = false;
@@ -461,6 +466,77 @@ class RxCB : public NimBLECharacteristicCallbacks {
                     pCtrlChar->setValue(nack, 2);
                     pCtrlChar->notify();
                 }
+                break;
+            }
+            // ─── Messaging opcodes ──────────────────────────────────────
+            case BLE_OP_MSG_CONVO_DATA: {
+                sMsgConvoBuffer += String((const char *)(val.data() + 1), val.size() - 1);
+                LOG2("[ble-rx] MSG_CONVO_DATA +%u bytes (total=%u)\n",
+                     (unsigned)(val.size() - 1), (unsigned)sMsgConvoBuffer.length());
+                break;
+            }
+            case BLE_OP_MSG_CONVO_DONE: {
+                uint8_t status = (val.size() > 1) ? val[1] : 1;
+                if (status == 0 && sMsgConvoBuffer.length() > 0) {
+                    msg_set_conversations_json(sMsgConvoBuffer.c_str(),
+                                               sMsgConvoBuffer.length());
+                }
+                msg_set_conversations_loading(false);
+                LOG1("[ble-rx] MSG_CONVO_DONE status=%u len=%u\n",
+                     status, (unsigned)sMsgConvoBuffer.length());
+                sMsgConvoBuffer = "";
+                break;
+            }
+            case BLE_OP_MSG_THREAD_DATA: {
+                sMsgThreadBuffer += String((const char *)(val.data() + 1), val.size() - 1);
+                LOG2("[ble-rx] MSG_THREAD_DATA +%u bytes (total=%u)\n",
+                     (unsigned)(val.size() - 1), (unsigned)sMsgThreadBuffer.length());
+                break;
+            }
+            case BLE_OP_MSG_THREAD_DONE: {
+                uint8_t status = (val.size() > 1) ? val[1] : 1;
+                if (status == 0 && sMsgThreadBuffer.length() > 0) {
+                    msg_set_messages_json(sMsgThreadBuffer.c_str(),
+                                          sMsgThreadBuffer.length());
+                }
+                msg_set_messages_loading(false);
+                LOG1("[ble-rx] MSG_THREAD_DONE status=%u len=%u\n",
+                     status, (unsigned)sMsgThreadBuffer.length());
+                sMsgThreadBuffer = "";
+                break;
+            }
+            case BLE_OP_MSG_SEND_RESULT: {
+                uint8_t status = (val.size() > 1) ? val[1] : 1;
+                LOG1("[ble-rx] MSG_SEND_RESULT status=%u\n", status);
+                if (status == 0) {
+                    msg_compose().state = COMPOSE_IDLE;
+                    msg_compose().text  = "";
+                }
+                break;
+            }
+            case BLE_OP_MSG_NEW_PUSH: {
+                size_t n = val.size() - 1;
+                LOG1("[ble-rx] MSG_NEW_PUSH (%u bytes)\n", (unsigned)n);
+                if (n > 0) msg_push_new_message((const char *)(val.data() + 1), n);
+                break;
+            }
+            case BLE_OP_MSG_STT_RESULT: {
+                String text((const char *)(val.data() + 1), val.size() - 1);
+                msg_compose().text  = text;
+                msg_compose().state = COMPOSE_SHOWING_TEXT;
+                LOG1("[ble-rx] MSG_STT_RESULT: %s\n", text.c_str());
+                break;
+            }
+            case BLE_OP_MSG_STT_ERROR: {
+                uint8_t code = (val.size() > 1) ? val[1] : 0;
+                LOG1("[ble-rx] MSG_STT_ERROR code=%u\n", code);
+                msg_compose().state = COMPOSE_IDLE;
+                break;
+            }
+            case BLE_OP_MSG_CONTACT_RESULT: {
+                size_t n = val.size() - 1;
+                LOG1("[ble-rx] MSG_CONTACT_RESULT (%u bytes)\n", (unsigned)n);
+                if (n > 0) msg_set_contacts_json((const char *)(val.data() + 1), n);
                 break;
             }
             default:
@@ -1124,4 +1200,55 @@ String ble_get_settings_write_payload() {
 void ble_clear_settings_write() {
     settingsWriteReceived = false;
     settingsWritePayload  = "";
+}
+
+// ─── Messaging outgoing (J->P) ───────────────────────────────────────────
+// All messaging opcodes route through CTRL (opcode-dispatched), never TX
+// (which is a raw byte pipe for audio/request payloads).  ble_dev_send()
+// handles the opcode+payload framing and notify-with-retry.
+
+void ble_msg_request_conversations() {
+    if (!deviceConnected) return;
+    msg_set_conversations_loading(true);
+    sMsgConvoBuffer = "";
+    ble_dev_send(BLE_OP_MSG_CONVO_REQ, nullptr, 0);
+    LOG1("[ble-msg] conversations requested\n");
+}
+
+void ble_msg_request_thread(const String &thread_id) {
+    if (!deviceConnected) return;
+    msg_set_messages_loading(true);
+    sMsgThreadBuffer = "";
+    ble_dev_send(BLE_OP_MSG_THREAD_REQ,
+                 (const uint8_t *)thread_id.c_str(), thread_id.length());
+    LOG1("[ble-msg] thread requested: %s\n", thread_id.c_str());
+}
+
+void ble_msg_send(const String &json) {
+    if (!deviceConnected) return;
+    msg_compose().state = COMPOSE_SENDING;
+    ble_dev_send(BLE_OP_MSG_SEND,
+                 (const uint8_t *)json.c_str(), json.length());
+    LOG1("[ble-msg] send: %u bytes\n", (unsigned)json.length());
+}
+
+void ble_msg_stt_start() {
+    if (!deviceConnected) return;
+    msg_compose().state = COMPOSE_RECORDING;
+    ble_dev_send(BLE_OP_MSG_STT_START, nullptr, 0);
+    LOG1("[ble-msg] STT start\n");
+}
+
+void ble_msg_stt_stop() {
+    if (!deviceConnected) return;
+    msg_compose().state = COMPOSE_TRANSCRIBING;
+    ble_dev_send(BLE_OP_MSG_STT_STOP, nullptr, 0);
+    LOG1("[ble-msg] STT stop\n");
+}
+
+void ble_msg_contact_search(const String &name) {
+    if (!deviceConnected) return;
+    ble_dev_send(BLE_OP_MSG_CONTACT_SEARCH,
+                 (const uint8_t *)name.c_str(), name.length());
+    LOG1("[ble-msg] contact search: %s\n", name.c_str());
 }

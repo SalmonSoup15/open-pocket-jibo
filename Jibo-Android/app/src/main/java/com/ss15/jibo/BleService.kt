@@ -9,6 +9,7 @@ import android.bluetooth.le.*
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
@@ -104,6 +105,24 @@ class BleService : LifecycleService() {
         const val OP_SETTINGS_REQ    = 0x60.toByte()  // P→J: empty — request all settings
         const val OP_SETTINGS_DATA   = 0x61.toByte()  // J→P: UTF-8 key=value\n blob
         const val OP_SETTINGS_WRITE  = 0x62.toByte()  // P→J: UTF-8 key=value\n (one or more)
+
+        // Messaging proxy — phone reads SMS/contacts on firmware's behalf
+        // and relays data via chunked BLE writes.
+        private const val OP_MSG_CONVO_REQ      = 0x70.toByte()
+        private const val OP_MSG_CONVO_DATA     = 0x71.toByte()
+        private const val OP_MSG_CONVO_DONE     = 0x72.toByte()
+        private const val OP_MSG_THREAD_REQ     = 0x73.toByte()
+        private const val OP_MSG_THREAD_DATA    = 0x74.toByte()
+        private const val OP_MSG_THREAD_DONE    = 0x75.toByte()
+        private const val OP_MSG_SEND           = 0x76.toByte()
+        private const val OP_MSG_SEND_RESULT    = 0x77.toByte()
+        private const val OP_MSG_NEW_PUSH       = 0x78.toByte()
+        private const val OP_MSG_STT_START      = 0x79.toByte()
+        private const val OP_MSG_STT_STOP       = 0x7A.toByte()
+        private const val OP_MSG_STT_RESULT     = 0x7B.toByte()
+        private const val OP_MSG_STT_ERROR      = 0x7C.toByte()
+        private const val OP_MSG_CONTACT_SEARCH = 0x7D.toByte()
+        private const val OP_MSG_CONTACT_RESULT = 0x7E.toByte()
 
         private const val DEBUG_LOG_MAX = 200
         private const val NOTIF_BUFFER_MAX = 50
@@ -303,6 +322,11 @@ class BleService : LifecycleService() {
     private var reconnectAttempts = 0
     private var shouldReconnect = false
 
+    // ─── Messaging proxy helpers ─────────────────────────────────────────────
+    private var messageService: MessageService? = null
+    private var contactResolver: ContactResolver? = null
+    private var speechManager: SpeechRecognizerManager? = null
+
     // ─── Notification buffer (mirrored to firmware) ───────────────────────────
     //
     // Keyed by sbn.key so add/remove from the listener stay in sync.  Held in
@@ -405,6 +429,18 @@ class BleService : LifecycleService() {
 
         Log.i(TAG, "BleService started — API level ${Build.VERSION.SDK_INT} " +
                 "(TIRAMISU=33, using ${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) "new" else "deprecated"} GATT callback)")
+
+        messageService = MessageService(this)
+        contactResolver = ContactResolver(this)
+        speechManager = SpeechRecognizerManager(
+            context = this,
+            onResult = { text ->
+                lifecycleScope.launch(Dispatchers.IO) { handleSttResult(text) }
+            },
+            onError = { code, msg ->
+                lifecycleScope.launch(Dispatchers.IO) { handleSttError(code, msg) }
+            }
+        )
 
         loadPairedDevice()
         _devEnabled.value = prefs.getBoolean(PREF_DEV_MODE, false)
@@ -672,6 +708,14 @@ class BleService : LifecycleService() {
                 // the firmware-side log forwarding now that link is up.
                 try { onDevModeReconnected() }
                 catch (e: Exception) { Log.w(TAG, "dev mode re-arm failed: ${e.message}") }
+                // Tell firmware whether the phone has messaging permissions
+                // so the ESP can enable/disable message-related UI elements.
+                try {
+                    val ms = if (hasMessagingPermissions()) "1" else "0"
+                    writeSettings(mapOf("MS" to ms))
+                } catch (e: Exception) {
+                    Log.w(TAG, "Messaging capability sync failed: ${e.message}")
+                }
             }
         }
 
@@ -898,6 +942,47 @@ class BleService : LifecycleService() {
                                         pendingTasks.clear()
                                         stopDevWatchdog()
                                     }
+                                }
+                            }
+                        }
+                        // ─── Messaging proxy opcodes ──────────────────────────
+                        OP_MSG_CONVO_REQ -> {
+                            lifecycleScope.launch(Dispatchers.IO) {
+                                handleMsgConvoRequest()
+                            }
+                        }
+                        OP_MSG_THREAD_REQ -> {
+                            if (data.size > 1) {
+                                val threadId = String(data, 1, data.size - 1, Charsets.UTF_8)
+                                lifecycleScope.launch(Dispatchers.IO) {
+                                    handleMsgThreadRequest(threadId)
+                                }
+                            }
+                        }
+                        OP_MSG_SEND -> {
+                            if (data.size > 1) {
+                                val json = String(data, 1, data.size - 1, Charsets.UTF_8)
+                                lifecycleScope.launch(Dispatchers.IO) {
+                                    handleMsgSend(json)
+                                }
+                            }
+                        }
+                        OP_MSG_STT_START -> {
+                            // Must run on main thread (SpeechRecognizer requirement)
+                            lifecycleScope.launch(Dispatchers.Main) {
+                                speechManager?.start()
+                            }
+                        }
+                        OP_MSG_STT_STOP -> {
+                            lifecycleScope.launch(Dispatchers.Main) {
+                                speechManager?.stop()
+                            }
+                        }
+                        OP_MSG_CONTACT_SEARCH -> {
+                            if (data.size > 1) {
+                                val query = String(data, 1, data.size - 1, Charsets.UTF_8)
+                                lifecycleScope.launch(Dispatchers.IO) {
+                                    handleContactSearch(query)
                                 }
                             }
                         }
@@ -1268,6 +1353,7 @@ class BleService : LifecycleService() {
         for ((name, args) in tools) {
             when (name) {
                 "store.memory" -> applyStoreMemory(args.trim())
+                "send.message" -> applySendMessage(args.trim())
                 else -> Log.d(TAG, "side-effect tool unknown: $name")
             }
         }
@@ -1287,6 +1373,36 @@ class BleService : LifecycleService() {
         // direct-Wi-Fi behavior, where a write to a disconnected
         // device would also be lost).
         sendMemoryPush(id, ts, text)
+    }
+
+    /**
+     * Execute a `[send.message]{name|text}` tool call from Gemini.
+     * Resolves the contact name via fuzzy search, then sends the SMS.
+     * This runs in the Gemini-proxy coroutine (IO dispatcher) so
+     * blocking calls are fine.
+     */
+    private fun applySendMessage(args: String) {
+        val pipe = args.indexOf('|')
+        if (pipe < 0) {
+            Log.w(TAG, "send.message: missing pipe separator in \"${args.take(40)}\"")
+            return
+        }
+        val name = args.substring(0, pipe).trim()
+        val message = args.substring(pipe + 1).trim()
+        if (name.isEmpty() || message.isEmpty()) return
+
+        val matches = contactResolver?.fuzzySearch(name) ?: emptyList()
+        if (matches.isEmpty()) {
+            Log.w(TAG, "send.message: no contact found for \"$name\"")
+            return
+        }
+        val best = matches.first()
+        val success = messageService?.sendMessage(
+            phoneNumber = best.phoneNumber,
+            appPkg = best.bestApp,
+            text = message
+        ) ?: false
+        Log.i(TAG, "send.message: name=\"$name\" to=${best.phoneNumber} success=$success")
     }
 
     private fun stripToolPrefix(resp: String): String {
@@ -2006,10 +2122,126 @@ class BleService : LifecycleService() {
         return sb.toString()
     }
 
+    // ─── Messaging proxy handlers ────────────────────────────────────────────
+
+    private suspend fun handleMsgConvoRequest() {
+        try {
+            val convos = messageService?.getConversations() ?: emptyList()
+            val json = messageService?.conversationsToJson(convos) ?: "[]"
+            streamChunkedPayload(OP_MSG_CONVO_DATA, json.toByteArray(Charsets.UTF_8))
+            writeToRxBlocking(byteArrayOf(OP_MSG_CONVO_DONE, 0x00))  // success
+        } catch (e: Exception) {
+            Log.e(TAG, "Convo request failed", e)
+            writeToRxBlocking(byteArrayOf(OP_MSG_CONVO_DONE, 0x01))  // error
+        }
+    }
+
+    private suspend fun handleMsgThreadRequest(threadId: String) {
+        try {
+            val messages = messageService?.getThreadMessages(threadId) ?: emptyList()
+            val json = messageService?.messagesToJson(messages) ?: "[]"
+            streamChunkedPayload(OP_MSG_THREAD_DATA, json.toByteArray(Charsets.UTF_8))
+            writeToRxBlocking(byteArrayOf(OP_MSG_THREAD_DONE, 0x00))
+        } catch (e: Exception) {
+            Log.e(TAG, "Thread request failed", e)
+            writeToRxBlocking(byteArrayOf(OP_MSG_THREAD_DONE, 0x01))
+        }
+    }
+
+    private suspend fun handleMsgSend(json: String) {
+        try {
+            val obj = JSONObject(json)
+            val threadId = obj.optString("thread_id", "").ifEmpty { null }
+            val phone = obj.optString("phone", "").ifEmpty { null }
+            val appPkg = obj.optString("app_pkg", "").ifEmpty { null }
+            val text = obj.getString("text")
+
+            val success = messageService?.sendMessage(threadId, phone, appPkg, text) ?: false
+            writeToRxBlocking(byteArrayOf(OP_MSG_SEND_RESULT, if (success) 0x00 else 0x01))
+        } catch (e: Exception) {
+            Log.e(TAG, "Send failed", e)
+            writeToRxBlocking(byteArrayOf(OP_MSG_SEND_RESULT, 0x01))
+        }
+    }
+
+    private suspend fun handleContactSearch(query: String) {
+        try {
+            val matches = contactResolver?.fuzzySearch(query) ?: emptyList()
+            val json = contactResolver?.toJson(matches) ?: "[]"
+            streamChunkedPayload(OP_MSG_CONTACT_RESULT, json.toByteArray(Charsets.UTF_8))
+        } catch (e: Exception) {
+            Log.e(TAG, "Contact search failed", e)
+            streamChunkedPayload(OP_MSG_CONTACT_RESULT, "[]".toByteArray(Charsets.UTF_8))
+        }
+    }
+
+    private fun handleSttResult(text: String) {
+        val textBytes = text.toByteArray(Charsets.UTF_8)
+        val payload = ByteArray(1 + textBytes.size)
+        payload[0] = OP_MSG_STT_RESULT
+        textBytes.copyInto(payload, 1)
+        writeChunkedFireAndForget(payload)
+    }
+
+    private fun handleSttError(code: Int, message: String) {
+        val msgBytes = message.toByteArray(Charsets.UTF_8)
+        val payload = ByteArray(2 + msgBytes.size)
+        payload[0] = OP_MSG_STT_ERROR
+        payload[1] = code.toByte()
+        msgBytes.copyInto(payload, 2)
+        writeChunkedFireAndForget(payload)
+    }
+
+    /** Fire-and-forget chunked write (no retry).  Used for STT callbacks
+     *  that run on the main thread where blocking is undesirable. */
+    private fun writeChunkedFireAndForget(payload: ByteArray) {
+        var pos = 0
+        while (pos < payload.size) {
+            val end = minOf(pos + negotiatedMtu, payload.size)
+            writeToRx(payload.copyOfRange(pos, end))
+            pos = end
+            if (pos < payload.size) Thread.sleep(6)
+        }
+    }
+
+    /**
+     * Stream a chunked BLE response: each chunk is [opcode][payload_slice].
+     * Mirrors the pattern used by [streamStockResponse].
+     */
+    private fun streamChunkedPayload(opcode: Byte, data: ByteArray) {
+        val maxChunk = (negotiatedMtu - 1).coerceAtLeast(18)
+        var pos = 0
+        while (pos < data.size) {
+            val end = minOf(pos + maxChunk, data.size)
+            val chunk = ByteArray(1 + (end - pos))
+            chunk[0] = opcode
+            System.arraycopy(data, pos, chunk, 1, end - pos)
+            if (!writeToRxBlocking(chunk)) {
+                Log.w(TAG, "streamChunkedPayload(0x${String.format("%02X", opcode)}): write failed at pos=$pos")
+                return
+            }
+            pos = end
+            if (pos < data.size) Thread.sleep(8)
+        }
+    }
+
+    /**
+     * Check whether the user has granted the SMS + Contacts permissions
+     * needed for the messaging feature.  Used by [writeSettings] to
+     * inject the MS (messaging-supported) capability flag.
+     */
+    private fun hasMessagingPermissions(): Boolean {
+        return checkSelfPermission(android.Manifest.permission.READ_SMS) ==
+                PackageManager.PERMISSION_GRANTED &&
+               checkSelfPermission(android.Manifest.permission.READ_CONTACTS) ==
+                PackageManager.PERMISSION_GRANTED
+    }
+
     override fun onDestroy() {
         shouldReconnect = false
         reconnectJob?.cancel()
         currentJob?.cancel()
+        speechManager?.destroy()
         gatt?.disconnect()
         gatt?.close()
         gattThread.quitSafely()
